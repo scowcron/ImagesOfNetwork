@@ -1,16 +1,19 @@
 ﻿import asyncio
+from collections import deque
 import datetime
 import logging
 import re
-from collections import deque
-import requests
+
 import discord
 import github3
 from praw.errors import HTTPException
+import requests
+
 from images_of import settings
 
 
-RETRY_MINUTES = 2
+RUN_INTERVAL = 2 # minutes
+STATS_INTERVAL = 15 # minutes
 LOG = logging.getLogger(__name__)
 
 # message type mapping
@@ -29,26 +32,19 @@ EVENT_FILTER = ['IssuesEvent', 'PullRequestEvent', 'PushEvent']
 ISSUE_ACTION_FILTER = ["opened", "closed", "reopened"]
 PULL_REQUEST_ACTION_FILTER = ["opened", "edited", "closed", "reopened", "synchronize"]
 
-
-CLIENT = discord.Client()
-
-CLIENT_ID = settings.DISCORD_CLIENTID
-TOKEN = settings.DISCORD_TOKEN
-
 #Regex pattern for identifying and stripping out markdown links
 MD_LINK_PATTERN = r'(\[)([^\]()#\n]+)\]\(([^\]()#\n]+)\)'
 MD_LINK_RE = re.compile(MD_LINK_PATTERN, flags=re.IGNORECASE)
+
 
 class DiscordBot:
     """Discord Announcer Bot to relay important and relevant network information to
     designated Discord channels on regular intervals."""
     def __init__(self, reddit):
         self.reddit = reddit
-        self.keep_alive_time = datetime.datetime.now()
-        self.run_init = False
+        self.run_init = True
 
-        global CLIENT
-        CLIENT.event(self.on_ready)
+        self._setup_client()
 
         self.last_oc_id = dict()
         self.oc_stream_placeholder = dict()
@@ -62,6 +58,10 @@ class DiscordBot:
         self.ghub = github3.login(token=settings.GITHUB_OAUTH_TOKEN)
         repo = self.ghub.repository(settings.GITHUB_REPO_USER, settings.GITHUB_REPO_NAME)
         self.last_github_event = repo.iter_events(number=1).next().id
+
+    def _setup_client(self):
+        self.client = discord.Client()
+        self.client.event(self._on_ready)
 
     ## ======================================================
 
@@ -77,12 +77,12 @@ class DiscordBot:
                 notification = "New __false-positive__ report from **/u/{}**:\r\n{}\r\n ".format(
                     message.author.name, message.permalink[:-7])
 
-                await CLIENT.send_message(FALSEPOS_CHAN, notification)
+                await self.client.send_message(self.falsepos_chan, notification)
                 message.mark_as_read()
             else:
                 LOG.info('[Inbox] Announcing inbox message.')
                 notification = self._format_message(message)
-                await CLIENT.send_message(INBOX_CHAN, notification)
+                await self.client.send_message(self.inbox_chan, notification)
                 message.mark_as_read()
 
 
@@ -155,12 +155,13 @@ class DiscordBot:
     ## ======================================================
 
     async def _process_oc_stream(self, multi):
+        LOG.debug('[OC] Checking for new OC submissions...')
         oc_multi = self.reddit.get_multireddit(settings.MULTI_OWNER, multi)
 
         if self.oc_stream_placeholder.get(multi, None) is None:
             limit = 125
         else:
-            limit = round(25 * RETRY_MINUTES)
+            limit = round(25 * RUN_INTERVAL)
 
         oc_stream = list(oc_multi.get_new(limit=limit, place_holder=self.oc_stream_placeholder.get(multi, None)))
         LOG.debug('[OC] len(oc_stream)=%s oc_stream_placeholder=%s',
@@ -185,7 +186,7 @@ class DiscordBot:
                     LOG.info('[OC] OC Post from /u/%s found: %s',
                              submission.author.name, submission.permalink)
 
-                    await CLIENT.send_message(OC_CHAN,
+                    await self.client.send_message(self.oc_chan,
                                               '---\n**New __OC__** by **/u/{}**:\r\n{}'.format(
                                                   submission.author.name, submission.permalink))
 
@@ -200,7 +201,7 @@ class DiscordBot:
 
         repo = self.ghub.repository(settings.GITHUB_REPO_USER, settings.GITHUB_REPO_NAME)
 
-        max_length = (10 * RETRY_MINUTES)
+        max_length = (10 * RUN_INTERVAL)
 
         event_queue = deque(maxlen=max_length)
 
@@ -238,11 +239,11 @@ class DiscordBot:
             event = event_queue.pop()
             if event.type == 'PushEvent':
                 LOG.info('[GitHub] Sending new PushEvent...')
-                await CLIENT.send_message(GITHUB_CHAN, self.format_push_event(event))
+                await self.client.send_message(self.github_chan, self.format_push_event(event))
 
             elif event.type == 'IssuesEvent':
                 LOG.info('[GitHub] Sending new IssuesEvent...')
-                await CLIENT.send_message(GITHUB_CHAN, self.format_issue_event(event))
+                await self.client.send_message(self.github_chan, self.format_issue_event(event))
 
             elif event.type == 'PullRequestEvent':
                 pass
@@ -314,7 +315,7 @@ class DiscordBot:
         if self.last_modlog_action.get(multi, None) is None:
             limit = 100
         else:
-            limit = round(25 * RETRY_MINUTES)
+            limit = round(25 * RUN_INTERVAL)
 
         LOG.debug('[ModLog] Getting %s modlog: limit=%s place_holder=%s',
                   multi, limit, self.last_modlog_action.get(multi, None))
@@ -368,114 +369,101 @@ class DiscordBot:
         message += '\n```\r\n '
 
         LOG.info('[ModLog] Announcing modlog moderator %s action', entry.action)
-        await CLIENT.send_message(MOD_CHAN, message)
-
-    ## ======================================================
-
-    @CLIENT.event
-    async def on_ready(self):
-        """Event that fires once the Discord CLIENT has connected to Discord, logged in,
-        and is ready to process new commands/events."""
-
-        LOG.info('[Discord] Logged in as %s', CLIENT.user.name)
-
-        global INBOX_CHAN
-        global FALSEPOS_CHAN
-        global GITHUB_CHAN
-        global OC_CHAN
-        global MOD_CHAN
-        global KEEPALIVE_CHAN
-
-        INBOX_CHAN = CLIENT.get_channel(settings.DISCORD_INBOX_CHAN_ID)
-        FALSEPOS_CHAN = CLIENT.get_channel(settings.DISCORD_FALSEPOS_CHAN_ID)
-        GITHUB_CHAN = CLIENT.get_channel(settings.DISCORD_GITHUB_CHAN_ID)
-        OC_CHAN = CLIENT.get_channel(settings.DISCORD_OC_CHAN_ID)
-        MOD_CHAN = CLIENT.get_channel(settings.DISCORD_MOD_CHAN_ID)
-        KEEPALIVE_CHAN = CLIENT.get_channel(settings.DISCORD_KEEPALIVE_CHAN_ID)
-
-        await CLIENT.send_message(KEEPALIVE_CHAN, 'Ready : {}'.format(datetime.datetime.now()))
-
-        if not self.run_init:
-            self.run_init = True
-            await self._run()
-            LOG.warning("Thread returning from 'await self._run'!")
-            self.run_init = False
+        await self.client.send_message(self.mod_chan, message)
 
     ##------------------------------------
 
-    async def _client_keepalive(self):
+    async def _report_client_stats(self):
+        while True:
+            await asyncio.sleep(60 * STATS_INTERVAL)
 
-        if (self.keep_alive_time + datetime.timedelta(minutes=15)) <= datetime.datetime.now():
-            msg = 'Messages: **{}**\n'.format(self.count_messages)
-            msg += 'Multireddit posts: **{}**\n'.format(self.count_oc)
-            msg += 'GitHub Events: **{}**\n'.format(self.count_gh_events)
-            msg += 'Network Modlog Actions: **{}**\r\n'.format(self.count_modlog)
+            msg = 'Messages: **{}**\n'.format(self.count_messages) \
+                + 'Multireddit posts: **{}**\n'.format(self.count_oc) \
+                + 'GitHub Events: **{}**\n'.format(self.count_gh_events) \
+                + 'Network Modlog Actions: **{}**\r\n'.format(self.count_modlog)
 
-            await CLIENT.send_message(KEEPALIVE_CHAN, msg)
-
-            self.keep_alive_time = datetime.datetime.now()
             self.count_gh_events = 0
             self.count_messages = 0
             self.count_modlog = 0
             self.count_oc = 0
 
+            await self.client.send_message(self.stats_chan, msg)
+
+    ##-------------------------------------
+
+    async def _process_messages(self):
+        LOG.debug('[Inbox] Checking for new messages...')
+        inbox = list(self.reddit.get_unread(limit=None))
+        LOG.info('[Inbox] Unread messages: %s', len(inbox))
+        for message in inbox:
+            await self._relay_inbox_message(message)
+
     ##------------------------------------
 
-    @asyncio.coroutine
-    async def _run(self):
+    async def _run_loop(self):
         while True:
-            try:
+            await self._run_once()
+            LOG.info('Sleeping for %s minute(s)...', RUN_INTERVAL)
+            await asyncio.sleep(60 * RUN_INTERVAL)
 
-                LOG.debug('[Inbox] Checking for new messages...')
-                inbox = list(self.reddit.get_unread(limit=None))
-                LOG.info('[Inbox] Unread messages: %s', len(inbox))
-                for message in inbox:
-                    await self._relay_inbox_message(message)
 
-                LOG.debug('[OC] Checking for new OC submissions...')
-                for multi in settings.MULTIREDDITS:
-                    await self._process_oc_stream(multi)
+    async def _run_once(self):
+        try:
+            await self._process_messages()
+            await self._process_oc_stream()
+            await self._process_github_events()
+            for multi in settings.MULTIREDDITS:
+                await self._process_network_modlog(multi)
 
-                # Check GitHub RSS feed....
-                await self._process_github_events()
+        except HTTPException as ex:
+            LOG.error('%s: %s', type(ex), ex)
+        except requests.ReadTimeout as ex:
+            LOG.error('%s: %s', type(ex), ex)
+        except requests.ConnectionError as ex:
+            LOG.error('%s: %s', type(ex), ex)
+        else:
+            LOG.debug('All tasks processed.')
 
-                for multi in settings.MULTIREDDITS:
-                    #Process network subreddit mod-log for new events...
-                    await self._process_network_modlog(multi)
+    ## ======================================================
 
-                await self._client_keepalive()
+    async def on_ready(self):
+        """Event that fires once the Discord client has connected to Discord, logged in,
+        and is ready to process new commands/events."""
 
-            except HTTPException as ex:
-                LOG.error('%s: %s', type(ex), ex)
-            except requests.ReadTimeout as ex:
-                LOG.error('%s: %s', type(ex), ex)
-            except requests.ConnectionError as ex:
-                LOG.error('%s: %s', type(ex), ex)
-            else:
-                LOG.debug('All tasks processed.')
+        LOG.info('[Discord] Logged in as %s', self.client.user.name)
 
-            LOG.info('Sleeping for %s minute(s)...', RETRY_MINUTES)
-            await asyncio.sleep((60 * RETRY_MINUTES) / 2)
-            await asyncio.sleep((60 * RETRY_MINUTES) / 2)
+        self.inbox_chan = self.client.get_channel(settings.DISCORD_INBOX_CHAN_ID)
+        self.falsepos_chan = self.client.get_channel(settings.DISCORD_FALSEPOS_CHAN_ID)
+        self.github_chan = self.client.get_channel(settings.DISCORD_GITHUB_CHAN_ID)
+        self.oc_chan = self.client.get_channel(settings.DISCORD_OC_CHAN_ID)
+        self.mod_chan = self.client.get_channel(settings.DISCORD_MOD_CHAN_ID)
+        self.stats_chan = self.client.get_channel(settings.DISCORD_STATS_CHAN_ID)
+
+        asyncio.ensure_future(self._report_client_stats(), loop=self.client.loop)
+
+        await self.client.send_message(self.stats_chan, 'Ready : {}'.format(datetime.datetime.now()))
+
+        if self.run_init:
+            self.run_init = False
+            await self._run_loop()
+            LOG.warning("Thread returning from 'await self._run_loop'!")
+            self.run_init = True
 
     ##------------------------------------
 
     def run(self):
-        """Initialized the Discord Bot and begin its processessing loop."""
-        #e = asyncio.get_event_loop()
-        #e.set_debug(True)
+        """Initialize the Discord Bot and begin its processessing loop."""
 
         while True:
-            global CLIENT
             try:
                 LOG.info('[Discord] Starting Discord client...')
-                CLIENT.run(TOKEN)
+                self.client.run(settings.DISCORD_TOKEN)
             except RuntimeError as ex:
-                LOG.error('%s: %s', type(ex), ex)
+                LOG.error('%s: %s', type(ex), ex, exc_info=ex)
             else:
-                LOG.warning("Thread returned from 'CLIENT.run()' blocking call!")
+                LOG.warning("Thread returned from 'client.run()' blocking call!")
                 asyncio.sleep(30)
 
-                CLIENT = discord.Client()
+            self._setup_client()
 
 
