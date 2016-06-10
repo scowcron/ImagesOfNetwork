@@ -1,5 +1,6 @@
 import logging
 import re
+import signal
 from collections import deque
 from datetime import datetime
 from time import sleep
@@ -19,7 +20,25 @@ class Bot:
         self.r = r
         self.should_post = should_post
         self.recent_posts = deque(maxlen=50)
+        self._needs_reload = False
 
+        self._load_blacklists()
+        self._load_all_subs()
+        self._load_patterns()
+
+        # XXX This will break on windows
+        signal.signal(signal.SIGHUP, self.on_sighup)
+
+
+    def _load_patterns(self):
+        ext_pattern = '({})$'.format('|'.join(settings.EXTENSIONS))
+        self.ext_re = re.compile(ext_pattern, flags=re.IGNORECASE)
+
+        domain_pattern = '^({})$'.format('|'.join(settings.DOMAINS))
+        self.domain_re = re.compile(domain_pattern, flags=re.IGNORECASE)
+
+
+    def _load_blacklists(self):
         LOG.info('Loading global user blacklist from wiki')
         self.blacklist_users = self._read_blacklist('userblacklist')
 
@@ -27,20 +46,15 @@ class Bot:
         blacklist_sub_pats = self._read_blacklist('subredditblacklist')
         self.blacklist_sub_res = [re.compile(pat) for pat in blacklist_sub_pats]
 
+    def _load_all_subs(self):
         self.subreddits = []
         for sub_settings in settings.CHILD_SUBS:
             self._load_sub(sub_settings)
         for sub_settings in settings.COUSIN_SUBS:
             self._load_sub(sub_settings)
 
-        ext_pattern = '({})$'.format('|'.join(settings.EXTENSIONS))
-        self.ext_re = re.compile(ext_pattern, flags=re.IGNORECASE)
-
-        domain_pattern = '^({})$'.format('|'.join(settings.DOMAINS))
-        self.domain_re = re.compile(domain_pattern, flags=re.IGNORECASE)
-
-    def _load_sub(self, settings):
-        sub = Subreddit(**settings)
+    def _load_sub(self, sub_settings):
+        sub = Subreddit(**sub_settings)
         sub.load_wiki_blacklist(self.r)
         self.subreddits.append(sub)
 
@@ -167,6 +181,7 @@ class Bot:
 
             try:
                 for post in stream:
+                    self._reload_if_necessary()
                     self._do_post(post)
             except HTTPException as e:
                 LOG.error('{}: {}'.format(type(e), e))
@@ -179,3 +194,17 @@ class Bot:
 
             LOG.info('Sleeping for {} minutes.'.format(RETRY_MINUTES))
             sleep(60 * RETRY_MINUTES)
+
+    def _reload_if_necessary(self):
+        if not self._needs_reload:
+            return
+
+        settings.reload()
+        self._load_blacklists()
+        self._load_all_subs()
+        self._load_patterns()
+        self._needs_reload = False
+
+    def on_sighup(self, signum, frame):
+        LOG.info('SIGHUP Received. Reloading settings.')
+        self._needs_reload = True

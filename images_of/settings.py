@@ -9,6 +9,7 @@ import os.path
 import pytoml as toml
 import pkg_resources
 
+
 def _conf_get(conf, *args, default=None):
     try:
         cur = conf
@@ -21,6 +22,9 @@ def _conf_get(conf, *args, default=None):
 
 class Settings:
     def __init__(self):
+        self._prepare_members()
+        self._files_loaded = []
+
         conf = pkg_resources.resource_string(__name__, 'data/settings.toml')
         self.loads(conf)
 
@@ -34,6 +38,12 @@ class Settings:
             pass
 
     def load(self, fname):
+        # adding to the list before actually trying to read
+        # allows reload() to retry all the file paths possible
+        # rather than just the ones that actually successfully
+        # loaded the first time
+        self._files_loaded.append(fname)
+
         with open(fname, 'r') as f:
             raw = f.read()
         self.loads(raw)
@@ -136,45 +146,57 @@ class Settings:
 
         return new_items
 
+    def reload(self):
+        file_names = self._files_loaded
+        self._files_loaded = []
 
-    USERNAME = ""
-    PASSWORD = ""
+        self._prepare_members()
 
-    CLIENT_ID = ""
-    CLIENT_SECRET = ""
-    REDIRECT_URI = ""
-    REFRESH_TOKEN = ""
+        conf = pkg_resources.resource_string(__name__, 'data/settings.toml')
+        self.loads(conf)
 
-    NETWORK_NAME = ""
-    MULTIREDDIT_USER = None
-    MULTIREDDITS = []
+        for fname in file_names:
+            self._try_load(fname)
 
-    DEFAULT_MODS = []
-    WIKI_PAGES = []
-    NSFW_OK = False
-    NSFW_WHITELIST_OK = True
-    COMMENT_FOOTER = ""
+    def _prepare_members(self):
+        self.USERNAME = ""
+        self.PASSWORD = ""
 
-    PARENT_SUB = ""
-    CHILD_SUBS = []
-    COUSIN_SUBS = []
+        self.CLIENT_ID = ""
+        self.CLIENT_SECRET = ""
+        self.REDIRECT_URI = ""
+        self.REFRESH_TOKEN = ""
 
-    EXTENSIONS = []
-    DOMAINS = []
+        self.NETWORK_NAME = ""
+        self.MULTIREDDIT_USER = None
+        self.MULTIREDDITS = []
 
-    DISCORD_CLIENTID = ""
-    DISCORD_TOKEN = ""
+        self.DEFAULT_MODS = []
+        self.WIKI_PAGES = []
+        self.NSFW_OK = False
+        self.NSFW_WHITELIST_OK = True
+        self.COMMENT_FOOTER = ""
 
-    DISCORD_INBOX_CHAN_ID = None
-    DISCORD_FALSEPOS_CHAN_ID = None
-    DISCORD_OC_CHAN_ID = None
-    DISCORD_GITHUB_CHAN_ID = None
-    DISCORD_MOD_CHAN_ID = None
-    DISCORD_KEEPALIVE_CHAN_ID = None
+        self.PARENT_SUB = ""
+        self.CHILD_SUBS = []
+        self.COUSIN_SUBS = []
 
-    GITHUB_OAUTH_TOKEN = ""
-    GITHUB_REPO_USER = ""
-    GITHUB_REPO_NAME = ""
+        self.EXTENSIONS = []
+        self.DOMAINS = []
+
+        self.DISCORD_CLIENTID = ""
+        self.DISCORD_TOKEN = ""
+
+        self.DISCORD_INBOX_CHAN_ID = None
+        self.DISCORD_FALSEPOS_CHAN_ID = None
+        self.DISCORD_OC_CHAN_ID = None
+        self.DISCORD_GITHUB_CHAN_ID = None
+        self.DISCORD_MOD_CHAN_ID = None
+        self.DISCORD_KEEPALIVE_CHAN_ID = None
+
+        self.GITHUB_OAUTH_TOKEN = ""
+        self.GITHUB_REPO_USER = ""
+        self.GITHUB_REPO_NAME = ""
 
 settings = Settings()
 
